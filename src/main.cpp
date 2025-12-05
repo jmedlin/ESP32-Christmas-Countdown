@@ -4,13 +4,28 @@
 #include <Adafruit_GFX.h>
 #include "Adafruit_LEDBackpack.h"
 #include "config.h"
+#include <ESPAsyncWebServer.h>
+#include "webpage.h"
 
 // Create display object
 Adafruit_7segment display = Adafruit_7segment();
 
+// Create web server
+AsyncWebServer server(80);
+
 // Track last time we printed network info
 unsigned long lastNetworkInfoTime = 0;
 const unsigned long networkInfoInterval = 300000;  // 5 minutes in milliseconds
+
+// Global variables for countdown info
+int g_daysUntilChristmas = 0;
+int g_currentYear = 0;
+int g_currentMonth = 0;
+int g_currentDay = 0;
+int g_currentHour = 0;
+int g_currentMin = 0;
+int g_currentSec = 0;
+int g_christmasYear = 0;
 
 void setup() {
   Serial.begin(115200);
@@ -97,6 +112,33 @@ void setup() {
     Serial.println("\nTime synchronized!");
     Serial.println(&timeinfo, "%A, %B %d %Y %H:%M:%S");
   }
+
+  // Setup web server
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+    request->send_P(200, "text/html", index_html);
+  });
+
+  server.on("/api/status", HTTP_GET, [](AsyncWebServerRequest *request){
+    String json = "{";
+    json += "\"days\":" + String(g_daysUntilChristmas) + ",";
+    json += "\"christmasYear\":" + String(g_christmasYear) + ",";
+    json += "\"year\":" + String(g_currentYear) + ",";
+    json += "\"month\":" + String(g_currentMonth) + ",";
+    json += "\"day\":" + String(g_currentDay) + ",";
+    json += "\"hour\":" + String(g_currentHour) + ",";
+    json += "\"min\":" + String(g_currentMin) + ",";
+    json += "\"sec\":" + String(g_currentSec) + ",";
+    json += "\"ssid\":\"" + String(WiFi.SSID()) + "\",";
+    json += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
+    json += "\"rssi\":" + String(WiFi.RSSI());
+    json += "}";
+    request->send(200, "application/json", json);
+  });
+
+  server.begin();
+  Serial.println("\nWeb server started!");
+  Serial.print("Visit: http://");
+  Serial.println(WiFi.localIP());
 }
 
 void loop() {
@@ -137,6 +179,16 @@ void loop() {
   // Calculate difference in seconds and convert to days
   double secondsUntilChristmas = difftime(christmasTime, now);
   int daysUntilChristmas = (int)(secondsUntilChristmas / 86400);
+
+  // Update global variables for web server
+  g_daysUntilChristmas = daysUntilChristmas;
+  g_currentYear = currentYear;
+  g_currentMonth = currentMonth;
+  g_currentDay = currentDay;
+  g_currentHour = timeinfo.tm_hour;
+  g_currentMin = timeinfo.tm_min;
+  g_currentSec = timeinfo.tm_sec;
+  g_christmasYear = christmasYear;
 
   // Handle Christmas day specially
   if (daysUntilChristmas == 0 && currentMonth == 12 && currentDay == 25) {
