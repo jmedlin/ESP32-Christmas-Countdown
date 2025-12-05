@@ -1,0 +1,34 @@
+// Copy this file to config.h and update with your actual credentials
+// config.h is gitignored and will not be committed
+
+#ifndef CONFIG_H
+#define CONFIG_H
+
+// WiFi credentials - multiple networks with fallback support
+// The device will try each network in order until it successfully connects
+struct WiFiNetwork {
+  const char* ssid;
+  const char* password;
+};
+
+const WiFiNetwork wifiNetworks[] = {
+  {"YOUR_HOME_NETWORK", "home_password"},
+  {"YOUR_WORK_NETWORK", "work_password"},
+  {"YOUR_MOBILE_HOTSPOT", "hotspot_password"}
+};
+
+const int numNetworks = sizeof(wifiNetworks) / sizeof(wifiNetworks[0]);
+
+// Network hostname - this is how the device will appear on your network
+const char* hostname = "christmas-countdown";
+
+// NTP settings
+const char* ntpServer = "pool.ntp.org";
+const long gmtOffset_sec = -18000;  // EST is UTC-5, PST is UTC-8 (-28800), etc.
+const int daylightOffset_sec = 3600;  // Add 3600 for daylight saving time, 0 otherwise
+
+// Display settings
+const uint8_t displayAddress = 0x70;  // Default I2C address for HT16K33
+const uint8_t displayBrightness = 15;  // 0-15, where 15 is brightest
+
+#endif
