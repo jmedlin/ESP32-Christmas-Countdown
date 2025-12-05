@@ -60,6 +60,37 @@ const char index_html[] PROGMEM = R"rawliteral(
         .status div {
             margin: 5px 0;
         }
+        .battery {
+            margin-top: 20px;
+            padding: 15px;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 10px;
+            font-size: 0.9em;
+        }
+        .battery-bar {
+            width: 100%;
+            height: 25px;
+            background: rgba(255, 255, 255, 0.2);
+            border-radius: 5px;
+            margin-top: 10px;
+            overflow: hidden;
+        }
+        .battery-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #4CAF50 0%, #8BC34A 100%);
+            transition: width 0.3s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            font-size: 0.9em;
+        }
+        .battery-fill.charging {
+            background: linear-gradient(90deg, #2196F3 0%, #03A9F4 100%);
+        }
+        .battery-fill.low {
+            background: linear-gradient(90deg, #f44336 0%, #ff5722 100%);
+        }
     </style>
 </head>
 <body>
@@ -75,6 +106,14 @@ const char index_html[] PROGMEM = R"rawliteral(
             <div><strong>IP:</strong> <span id="ip">--</span></div>
             <div><strong>Signal:</strong> <span id="rssi">--</span> dBm</div>
         </div>
+        <div class="battery">
+            <div><strong>Battery:</strong> <span id="batteryVoltage">--</span>V (<span id="batteryPercent">--</span>%) - <span id="batteryStatus">--</span></div>
+            <div class="battery-bar">
+                <div class="battery-fill" id="batteryBar" style="width: 0%;">
+                    <span id="batteryBarText"></span>
+                </div>
+            </div>
+        </div>
     </div>
     <script>
         function updateCountdown() {
@@ -88,6 +127,25 @@ const char index_html[] PROGMEM = R"rawliteral(
                     document.getElementById('ssid').textContent = data.ssid;
                     document.getElementById('ip').textContent = data.ip;
                     document.getElementById('rssi').textContent = data.rssi;
+
+                    // Update battery information
+                    document.getElementById('batteryVoltage').textContent = data.batteryVoltage.toFixed(2);
+                    document.getElementById('batteryPercent').textContent = data.batteryPercent;
+                    document.getElementById('batteryStatus').textContent = data.batteryStatus;
+
+                    // Update battery bar
+                    const batteryBar = document.getElementById('batteryBar');
+                    const batteryBarText = document.getElementById('batteryBarText');
+                    batteryBar.style.width = data.batteryPercent + '%';
+                    batteryBarText.textContent = data.batteryPercent + '%';
+
+                    // Change color based on status and level
+                    batteryBar.classList.remove('charging', 'low');
+                    if (data.batteryStatus === 'Charging' || data.batteryStatus === 'Charged') {
+                        batteryBar.classList.add('charging');
+                    } else if (data.batteryPercent < 20) {
+                        batteryBar.classList.add('low');
+                    }
                 })
                 .catch(error => console.error('Error:', error));
         }

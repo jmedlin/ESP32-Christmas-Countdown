@@ -6,9 +6,13 @@
 #include "config.h"
 #include <ESPAsyncWebServer.h>
 #include "webpage.h"
+#include <Adafruit_MAX1704X.h>
 
 // Create display object
 Adafruit_7segment display = Adafruit_7segment();
+
+// Create MAX17048 fuel gauge object
+Adafruit_MAX17048 fuelGauge;
 
 // Create web server
 AsyncWebServer server(80);
@@ -16,6 +20,13 @@ AsyncWebServer server(80);
 // Track last time we printed network info
 unsigned long lastNetworkInfoTime = 0;
 const unsigned long networkInfoInterval = 300000;  // 5 minutes in milliseconds
+
+// Track last NTP sync time
+unsigned long lastNtpSyncTime = 0;
+const unsigned long ntpSyncInterval = 3600000;  // 1 hour in milliseconds
+
+// Track if we have valid time
+bool hasValidTime = false;
 
 // Global variables for countdown info
 int g_daysUntilChristmas = 0;
@@ -26,11 +37,196 @@ int g_currentHour = 0;
 int g_currentMin = 0;
 int g_currentSec = 0;
 int g_christmasYear = 0;
+float g_batteryVoltage = 0.0;
+int g_batteryPercent = 0;
+String g_batteryStatus = "Unknown";
+float g_batteryChargeRate = 0.0;
+
+// Low battery protection
+#define LOW_BATTERY_VOLTAGE 3.0  // Voltage threshold for low battery
+#define LOW_BATTERY_PERCENT 5    // Percentage threshold for low battery
+
+// Function to try connecting to WiFi and syncing time
+void tryWifiAndNtpSync() {
+  // Check if we're already connected
+  if (WiFi.status() == WL_CONNECTED) {
+    // Already connected, just sync time
+    Serial.println("Re-syncing time from NTP...");
+    configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+    delay(2000);  // Give it a moment to sync
+
+    struct tm timeinfo;
+    if (getLocalTime(&timeinfo)) {
+      Serial.println("Time re-synchronized!");
+      Serial.println(&timeinfo, "%A, %B %d %Y %H:%M:%S");
+      hasValidTime = true;
+      lastNtpSyncTime = millis();
+    } else {
+      Serial.println("NTP sync failed, will retry later");
+    }
+    return;
+  }
+
+  // Not connected, try to connect
+  Serial.println("\nAttempting to connect to WiFi...");
+
+  for (int i = 0; i < numNetworks; i++) {
+    Serial.print("Trying network: ");
+    Serial.println(wifiNetworks[i].ssid);
+
+    WiFi.begin(wifiNetworks[i].ssid, wifiNetworks[i].password);
+
+    int attempts = 0;
+    int maxAttempts = 10;  // 5 seconds per network
+
+    while (WiFi.status() != WL_CONNECTED && attempts < maxAttempts) {
+      delay(500);
+      Serial.print(".");
+      attempts++;
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.println("\nWiFi reconnected!");
+      Serial.print("Connected to: ");
+      Serial.println(wifiNetworks[i].ssid);
+      Serial.print("IP address: ");
+      Serial.println(WiFi.localIP());
+
+      // Now sync time
+      Serial.println("Getting time from NTP server...");
+      configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+
+      struct tm timeinfo;
+      int retries = 0;
+      while (!getLocalTime(&timeinfo) && retries < 20) {
+        delay(500);
+        retries++;
+      }
+
+      if (retries < 20) {
+        Serial.println("Time synchronized!");
+        Serial.println(&timeinfo, "%A, %B %d %Y %H:%M:%S");
+        hasValidTime = true;
+        lastNtpSyncTime = millis();
+      }
+
+      return;
+    } else {
+      Serial.println("\nFailed to connect");
+      WiFi.disconnect();
+    }
+  }
+
+  Serial.println("Could not connect to any WiFi network, will retry later");
+}
+
+// Function to enter deep sleep mode
+void enterDeepSleep() {
+  Serial.println("\n!!! LOW BATTERY WARNING !!!");
+  Serial.println("Battery critically low - entering deep sleep to protect battery");
+  Serial.print("Voltage: ");
+  Serial.print(g_batteryVoltage, 2);
+  Serial.println("V");
+  Serial.print("Percent: ");
+  Serial.print(g_batteryPercent);
+  Serial.println("%");
+
+  // Show error on display
+  display.clear();
+  display.print(0xDEAD);  // Show "dead" pattern
+  display.writeDisplay();
+  delay(2000);
+  display.clear();
+  display.writeDisplay();
+
+  Serial.println("Device will wake when USB power is connected or after deep sleep timer");
+  Serial.flush();
+
+  // Configure wake on USB power detection (if supported) or timer
+  // Wake up every hour to check if power has been restored
+  esp_sleep_enable_timer_wakeup(3600ULL * 1000000ULL);  // 1 hour in microseconds
+
+  // Enter deep sleep
+  esp_deep_sleep_start();
+}
+
+// Function to read battery status from MAX17048
+void updateBatteryStatus() {
+  // Read voltage from fuel gauge
+  g_batteryVoltage = fuelGauge.cellVoltage();
+
+  // Read state of charge percentage (more accurate than voltage-based calculation)
+  g_batteryPercent = (int)fuelGauge.cellPercent();
+
+  // Read charge rate (positive = charging, negative = discharging)
+  g_batteryChargeRate = fuelGauge.chargeRate();
+
+  // Determine charging status based on charge rate and voltage
+  if (g_batteryChargeRate > 0.1) {
+    // Positive charge rate = charging
+    if (g_batteryPercent >= 99) {
+      g_batteryStatus = "Charged";
+    } else {
+      g_batteryStatus = "Charging";
+    }
+  } else if (g_batteryChargeRate < -0.1) {
+    // Negative charge rate = discharging
+    g_batteryStatus = "Discharging";
+  } else {
+    // Near-zero charge rate
+    if (g_batteryPercent >= 95 && g_batteryVoltage >= 4.1) {
+      g_batteryStatus = "Charged";
+    } else {
+      g_batteryStatus = "On Battery";
+    }
+  }
+
+  // Check for critically low battery (only when discharging)
+  if (g_batteryStatus == "Discharging" || g_batteryStatus == "On Battery") {
+    if (g_batteryVoltage <= LOW_BATTERY_VOLTAGE || g_batteryPercent <= LOW_BATTERY_PERCENT) {
+      enterDeepSleep();
+    }
+  }
+}
 
 void setup() {
   Serial.begin(115200);
   delay(1000);
   Serial.println("\n\nChristmas Countdown Timer");
+
+  // Check wake-up reason
+  esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
+  if (wakeup_reason == ESP_SLEEP_WAKEUP_TIMER) {
+    Serial.println("Woke from deep sleep (battery check)");
+  }
+
+  // Initialize MAX17048 fuel gauge
+  if (!fuelGauge.begin()) {
+    Serial.println("Couldn't find MAX17048 fuel gauge!");
+    Serial.println("Battery monitoring will be unavailable");
+  } else {
+    Serial.println("MAX17048 fuel gauge initialized");
+    float voltage = fuelGauge.cellVoltage();
+    float percent = fuelGauge.cellPercent();
+
+    Serial.print("Battery Voltage: ");
+    Serial.print(voltage, 2);
+    Serial.println("V");
+    Serial.print("Battery Percent: ");
+    Serial.print(percent, 1);
+    Serial.println("%");
+
+    // If we woke from sleep, check if battery is still too low
+    if (wakeup_reason == ESP_SLEEP_WAKEUP_TIMER) {
+      if (voltage <= LOW_BATTERY_VOLTAGE && percent <= LOW_BATTERY_PERCENT) {
+        Serial.println("Battery still too low, going back to sleep");
+        esp_sleep_enable_timer_wakeup(3600ULL * 1000000ULL);  // Sleep another hour
+        esp_deep_sleep_start();
+      } else {
+        Serial.println("Battery recovered! Continuing normal operation");
+      }
+    }
+  }
 
   // Initialize the display
   if (!display.begin(displayAddress)) {
@@ -88,64 +284,83 @@ void setup() {
 
   if (!connected) {
     Serial.println("Could not connect to any WiFi network!");
-    display.print(-1);  // Show error on display
-    display.writeDisplay();
-    while (1);  // Stop here if no WiFi
-  }
-
-  // Initialize time from NTP
-  Serial.println("Getting time from NTP server...");
-  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
-
-  // Wait for time to be set
-  struct tm timeinfo;
-  int retries = 0;
-  while (!getLocalTime(&timeinfo) && retries < 20) {
-    delay(500);
-    Serial.print(".");
-    retries++;
-  }
-
-  if (retries >= 20) {
-    Serial.println("\nFailed to obtain time");
+    Serial.println("Continuing without WiFi - using internal RTC only");
+    Serial.println("Warning: Time may not be accurate until WiFi connection is established");
   } else {
-    Serial.println("\nTime synchronized!");
-    Serial.println(&timeinfo, "%A, %B %d %Y %H:%M:%S");
+    // Initialize time from NTP
+    Serial.println("Getting time from NTP server...");
+    configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+
+    // Wait for time to be set
+    struct tm timeinfo;
+    int retries = 0;
+    while (!getLocalTime(&timeinfo) && retries < 20) {
+      delay(500);
+      Serial.print(".");
+      retries++;
+    }
+
+    if (retries >= 20) {
+      Serial.println("\nFailed to obtain time from NTP");
+      hasValidTime = false;
+    } else {
+      Serial.println("\nTime synchronized!");
+      Serial.println(&timeinfo, "%A, %B %d %Y %H:%M:%S");
+      hasValidTime = true;
+      lastNtpSyncTime = millis();
+    }
   }
 
-  // Setup web server
-  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
-    request->send_P(200, "text/html", index_html);
-  });
+  // Setup web server (only if WiFi is connected)
+  if (connected) {
+    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+      request->send_P(200, "text/html", index_html);
+    });
 
-  server.on("/api/status", HTTP_GET, [](AsyncWebServerRequest *request){
-    String json = "{";
-    json += "\"days\":" + String(g_daysUntilChristmas) + ",";
-    json += "\"christmasYear\":" + String(g_christmasYear) + ",";
-    json += "\"year\":" + String(g_currentYear) + ",";
-    json += "\"month\":" + String(g_currentMonth) + ",";
-    json += "\"day\":" + String(g_currentDay) + ",";
-    json += "\"hour\":" + String(g_currentHour) + ",";
-    json += "\"min\":" + String(g_currentMin) + ",";
-    json += "\"sec\":" + String(g_currentSec) + ",";
-    json += "\"ssid\":\"" + String(WiFi.SSID()) + "\",";
-    json += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
-    json += "\"rssi\":" + String(WiFi.RSSI());
-    json += "}";
-    request->send(200, "application/json", json);
-  });
+    server.on("/api/status", HTTP_GET, [](AsyncWebServerRequest *request){
+      String json = "{";
+      json += "\"days\":" + String(g_daysUntilChristmas) + ",";
+      json += "\"christmasYear\":" + String(g_christmasYear) + ",";
+      json += "\"year\":" + String(g_currentYear) + ",";
+      json += "\"month\":" + String(g_currentMonth) + ",";
+      json += "\"day\":" + String(g_currentDay) + ",";
+      json += "\"hour\":" + String(g_currentHour) + ",";
+      json += "\"min\":" + String(g_currentMin) + ",";
+      json += "\"sec\":" + String(g_currentSec) + ",";
+      json += "\"ssid\":\"" + String(WiFi.SSID()) + "\",";
+      json += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
+      json += "\"rssi\":" + String(WiFi.RSSI()) + ",";
+      json += "\"batteryVoltage\":" + String(g_batteryVoltage, 2) + ",";
+      json += "\"batteryPercent\":" + String(g_batteryPercent) + ",";
+      json += "\"batteryStatus\":\"" + g_batteryStatus + "\"";
+      json += "}";
+      request->send(200, "application/json", json);
+    });
 
-  server.begin();
-  Serial.println("\nWeb server started!");
-  Serial.print("Visit: http://");
-  Serial.println(WiFi.localIP());
+    server.begin();
+    Serial.println("\nWeb server started!");
+    Serial.print("Visit: http://");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("\nWeb server not started (no WiFi connection)");
+  }
 }
 
 void loop() {
+  // Check if it's time to re-sync NTP (every hour)
+  unsigned long currentTime = millis();
+  if (currentTime - lastNtpSyncTime >= ntpSyncInterval) {
+    tryWifiAndNtpSync();
+  }
+
   struct tm timeinfo;
 
   if (!getLocalTime(&timeinfo)) {
     Serial.println("Failed to obtain time");
+    if (!hasValidTime) {
+      Serial.println("No valid time available - trying to sync...");
+      tryWifiAndNtpSync();
+    }
     display.print(0);
     display.writeDisplay();
     delay(1000);
@@ -190,6 +405,9 @@ void loop() {
   g_currentSec = timeinfo.tm_sec;
   g_christmasYear = christmasYear;
 
+  // Update battery status
+  updateBatteryStatus();
+
   // Handle Christmas day specially
   if (daysUntilChristmas == 0 && currentMonth == 12 && currentDay == 25) {
     // It's Christmas! Show 0 and blink
@@ -221,19 +439,39 @@ void loop() {
   Serial.print(" - Days until Christmas ");
   Serial.print(christmasYear);
   Serial.print(": ");
-  Serial.println(daysUntilChristmas);
+  Serial.print(daysUntilChristmas);
+  Serial.print(" - Battery: ");
+  Serial.print(g_batteryVoltage, 2);
+  Serial.print("V (");
+  Serial.print(g_batteryPercent);
+  Serial.print("%) - ");
+  Serial.println(g_batteryStatus);
 
   // Print network info every 5 minutes
-  unsigned long currentTime = millis();
   if (currentTime - lastNetworkInfoTime >= networkInfoInterval) {
     Serial.println("\n--- Network Status ---");
-    Serial.print("Connected to: ");
-    Serial.println(WiFi.SSID());
-    Serial.print("IP Address: ");
-    Serial.println(WiFi.localIP());
-    Serial.print("Signal Strength: ");
-    Serial.print(WiFi.RSSI());
-    Serial.println(" dBm");
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.print("Connected to: ");
+      Serial.println(WiFi.SSID());
+      Serial.print("IP Address: ");
+      Serial.println(WiFi.localIP());
+      Serial.print("Signal Strength: ");
+      Serial.print(WiFi.RSSI());
+      Serial.println(" dBm");
+      Serial.print("Last NTP sync: ");
+      Serial.print((currentTime - lastNtpSyncTime) / 1000);
+      Serial.println(" seconds ago");
+    } else {
+      Serial.println("WiFi: Not Connected");
+      Serial.println("Running on internal RTC");
+      if (hasValidTime) {
+        Serial.print("Last NTP sync: ");
+        Serial.print((currentTime - lastNtpSyncTime) / 1000);
+        Serial.println(" seconds ago");
+      } else {
+        Serial.println("Warning: Time may not be accurate");
+      }
+    }
     Serial.println("---------------------\n");
     lastNetworkInfoTime = currentTime;
   }
