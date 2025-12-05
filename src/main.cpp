@@ -8,6 +8,10 @@
 // Create display object
 Adafruit_7segment display = Adafruit_7segment();
 
+// Track last time we printed network info
+unsigned long lastNetworkInfoTime = 0;
+const unsigned long networkInfoInterval = 300000;  // 5 minutes in milliseconds
+
 void setup() {
   Serial.begin(115200);
   delay(1000);
@@ -154,10 +158,33 @@ void loop() {
   Serial.print(currentDay);
   Serial.print("/");
   Serial.print(currentYear);
+  Serial.print(" ");
+  Serial.print(timeinfo.tm_hour);
+  Serial.print(":");
+  if (timeinfo.tm_min < 10) Serial.print("0");
+  Serial.print(timeinfo.tm_min);
+  Serial.print(":");
+  if (timeinfo.tm_sec < 10) Serial.print("0");
+  Serial.print(timeinfo.tm_sec);
   Serial.print(" - Days until Christmas ");
   Serial.print(christmasYear);
   Serial.print(": ");
   Serial.println(daysUntilChristmas);
+
+  // Print network info every 5 minutes
+  unsigned long currentTime = millis();
+  if (currentTime - lastNetworkInfoTime >= networkInfoInterval) {
+    Serial.println("\n--- Network Status ---");
+    Serial.print("Connected to: ");
+    Serial.println(WiFi.SSID());
+    Serial.print("IP Address: ");
+    Serial.println(WiFi.localIP());
+    Serial.print("Signal Strength: ");
+    Serial.print(WiFi.RSSI());
+    Serial.println(" dBm");
+    Serial.println("---------------------\n");
+    lastNetworkInfoTime = currentTime;
+  }
 
   // Update every 60 seconds
   delay(60000);
